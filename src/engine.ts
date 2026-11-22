@@ -1,4 +1,4 @@
-import { countries } from './data'
+const countries = ['GB','JP','CA','AU','BR','EG','FR','CN','IS','NO','PE','IN','IT','DE','KR','MX','KE','AR','GR','NZ'].map(code => ({code}))
 export type WordState = { mastery:number; streak:number; due:number; mistakes:number; [futureField:string]:unknown }
 export type Progress = { schemaVersion:number; xp:number; totalCorrect:number; streakDays:number; lastDate:string; words:Record<string,WordState>; completed:number[]; unlockedCountries:number; unlockedCountryCodes:string[]; dark:boolean; mentor:boolean; [futureField:string]:unknown }
 export const SCHEMA_VERSION=2
@@ -11,7 +11,7 @@ const normalWord=(v:unknown):WordState=>{const p=record(v)?v:{};return {...p,mas
 const combineWord=(a:WordState,b:WordState):WordState=>({...a,...b,mastery:Math.max(a.mastery,b.mastery),streak:Math.max(a.streak,b.streak),mistakes:Math.min(a.mistakes,b.mistakes),due:Math.max(a.due,b.due)})
 // When a word is renamed in a future course, add old -> new here before shipping.
 const wordAliases:Record<string,string>={}
-const stableWord=(en:string)=>{const normalized=en.normalize('NFKC').toLowerCase().replace(/\s+/g,' ').trim();return `word:${wordAliases[normalized]||normalized}`}
+const stableWord=(en:string)=>{const normalized=en.normalize('NFKC').toLowerCase().replace(/[.!?…]+$/g,'').replace(/\s+/g,' ').trim();return `word:${wordAliases[normalized]||normalized}`}
 // Migrations never filter unknown level/word IDs: future course revisions can restore them.
 // Add future schema upgrades here, one version at a time; retain unrecognized fields.
 export function validateProgress(data:unknown):Progress {
@@ -23,6 +23,7 @@ export function validateProgress(data:unknown):Progress {
  if(version>SCHEMA_VERSION)throw Error('Этот файл создан более новой версией Академии')
  const words:Record<string,WordState>={};for(const [id,value] of Object.entries(source.words))if(record(value))words[id]=normalWord(value)
  for(const [id,state] of Object.entries(words)){const old=/^\d+:(.+)$/.exec(id);if(old){const stable=stableWord(old[1]);words[stable]=words[stable]?combineWord(words[stable],state):state}}
+ for(const [id,state] of Object.entries(words)){if(id.startsWith('word:')){const stable=stableWord(id.slice(5));if(stable!==id)words[stable]=words[stable]?combineWord(words[stable],state):state}}
  const completed=unique(source.completed.filter((v):v is number=>typeof v==='number'&&Number.isSafeInteger(v)&&v>0))
  const unlockedCountries=Math.max(1,positive(source.unlockedCountries,1))
  const unlockedCountryCodes=unique([...(Array.isArray(source.unlockedCountryCodes)?source.unlockedCountryCodes.filter((v):v is string=>typeof v==='string'):countries.slice(0,unlockedCountries).map(c=>c.code)),...countries.slice(0,Math.min(unlockedCountries,countries.length)).map(c=>c.code)])
@@ -34,14 +35,14 @@ export function mergeProgress(current:Progress,incoming:Progress):Progress {
  const completed=unique([...a.completed,...b.completed]),unlockedCountryCodes=unique([...a.unlockedCountryCodes,...b.unlockedCountryCodes])
  return {...a,...b,schemaVersion:SCHEMA_VERSION,words,completed,unlockedCountryCodes,xp:Math.max(a.xp,b.xp),totalCorrect:Math.max(a.totalCorrect,b.totalCorrect),streakDays:Math.max(a.streakDays,b.streakDays),lastDate:a.lastDate>b.lastDate?a.lastDate:b.lastDate,unlockedCountries:Math.max(a.unlockedCountries,b.unlockedCountries,unlockedCountryCodes.length,1+Math.floor(Math.max(a.totalCorrect,b.totalCorrect)/10)+completed.length)}
 }
-export function loadProgress():Progress {let result=initial;try {for(const storageKey of [legacyKey,backupKey,key]){const raw=localStorage.getItem(storageKey);if(!raw)continue;try{result=mergeProgress(result,validateProgress(JSON.parse(raw)))}catch{/* keep other copies */}}}catch{/* localStorage blocked */}return result}
+export function loadProgress():Progress {let result=initial;try {const current=localStorage.getItem(key);if(current){try{return validateProgress(JSON.parse(current))}catch{/* fall back to other copies */}}for(const storageKey of [legacyKey,backupKey]){const raw=localStorage.getItem(storageKey);if(!raw)continue;try{result=mergeProgress(result,validateProgress(JSON.parse(raw)))}catch{/* keep other copies */}}}catch{/* localStorage blocked */}return result}
 export function saveProgress(p:Progress){try{const old=localStorage.getItem(key);if(old)try{validateProgress(JSON.parse(old));localStorage.setItem(backupKey,old)}catch{/* don't overwrite a valid backup */}localStorage.setItem(key,JSON.stringify(validateProgress(p)))}catch{/* Private mode may block storage; file export remains available */}}
 export function exportProgress(p:Progress){const payload={format:'world-explorer-academy-progress',exportedAt:new Date().toISOString(),progress:validateProgress(p)};const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='world-explorer-progress.json';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000)}
 export const wordKey=(_level:number,en:string)=>stableWord(en)
 export function markWord(p:Progress,level:number,en:string,correct:boolean):Progress { const key=wordKey(level,en); const old=p.words[key]||{mastery:0,streak:0,due:0,mistakes:0}; const streak=correct?old.streak+1:0; const mastery=correct?Math.min(5,old.mastery+1):Math.max(0,old.mastery-1); const delays=[0,0,3600000,86400000,3*86400000,7*86400000]; return {...p,words:{...p.words,[key]:{mastery,streak,due:correct && (old.mistakes===0||streak>=3)?Date.now()+delays[mastery]:0,mistakes:correct&&streak>=3?0:old.mistakes+(correct?0:1)}}} }
 export function reward(p:Progress,xp:number):Progress { const today=new Date().toLocaleDateString('en-CA'); const yesterday=new Date(Date.now()-86400000).toLocaleDateString('en-CA'); const streakDays=p.lastDate===today?p.streakDays:p.lastDate===yesterday?p.streakDays+1:1; const totalCorrect=p.totalCorrect+1; const unlockedCountries=Math.max(p.unlockedCountries,1+Math.floor(totalCorrect/10)+p.completed.length);return {...p,xp:p.xp+xp,totalCorrect,lastDate:today,streakDays,unlockedCountries,unlockedCountryCodes:unique([...p.unlockedCountryCodes,...countries.slice(0,unlockedCountries).map(c=>c.code)])} }
-export function rank(xp:number){if(xp>=1800)return 'Гранд-Магистр Атласа';if(xp>=900)return 'Мастер Экспедиций';if(xp>=400)return 'Картограф Мира';if(xp>=150)return 'Искатель Открытий';return 'Юный Следопыт'}
-export function nextRank(xp:number){return [150,400,900,1800].find(n=>n>xp)||Math.ceil((xp+1)/500)*500}
+
+
 
 let context:AudioContext|undefined
 export function sound(type:'tap'|'success'|'error') {try {context ||= new AudioContext(); if(context.state==='suspended')void context.resume(); const now=context.currentTime; const notes=type==='success'?[523,659,784]:type==='error'?[260,220]:[480]; notes.forEach((freq,i)=>{const osc=context!.createOscillator(),gain=context!.createGain();osc.type='sine';osc.frequency.setValueAtTime(freq,now+i*.085);gain.gain.setValueAtTime(.0001,now+i*.085);gain.gain.exponentialRampToValueAtTime(type==='tap'?.035:.065,now+i*.085+.015);gain.gain.exponentialRampToValueAtTime(.0001,now+i*.085+.18);osc.connect(gain).connect(context!.destination);osc.start(now+i*.085);osc.stop(now+i*.085+.19)})}catch{/* Audio may be unavailable */} }
