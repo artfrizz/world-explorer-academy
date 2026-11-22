@@ -1,0 +1,1 @@
+export default { content: ['./index.html','./src/**/*.{ts,tsx}'], theme: { extend: { fontFamily: { sans: ['Nunito','Segoe UI','sans-serif'], display: ['Outfit','Segoe UI','sans-serif'] } } }, plugins: [] }
