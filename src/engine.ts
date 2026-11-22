@@ -1,14 +1,45 @@
-import { countries, levels } from './data'
-export type WordState = { mastery:number; streak:number; due:number; mistakes:number }
-export type Progress = { xp:number; totalCorrect:number; streakDays:number; lastDate:string; words:Record<string,WordState>; completed:number[]; unlockedCountries:number; dark:boolean; mentor:boolean }
-export const initial:Progress = {xp:0,totalCorrect:0,streakDays:0,lastDate:'',words:{},completed:[],unlockedCountries:1,dark:true,mentor:true}
-const key = 'world-explorer-academy-v1'
-export function loadProgress():Progress { try { const raw=localStorage.getItem(key); if(!raw)return initial; const data=JSON.parse(raw); return validateProgress(data) } catch {return initial} }
-export function validateProgress(data:unknown):Progress { if(!data || typeof data!=='object')throw Error('Неверный файл прогресса'); const p=data as Partial<Progress>; if(typeof p.xp!=='number'||!Number.isFinite(p.xp)||!p.words||typeof p.words!=='object'||!Array.isArray(p.completed))throw Error('Файл не содержит корректный прогресс'); return {...initial,...p,xp:Math.max(0,Math.floor(p.xp)),totalCorrect:Math.max(0,Math.floor(p.totalCorrect||0)),unlockedCountries:Math.min(countries.length,Math.max(1,Math.floor(p.unlockedCountries||1))),completed:p.completed.filter((n):n is number=>typeof n==='number'&&n>=1&&n<=levels.length),words:p.words} }
-export function saveProgress(p:Progress){try{localStorage.setItem(key,JSON.stringify(p))}catch{/* Private mode may block storage */}}
-export const wordKey=(level:number,en:string)=>`${level}:${en}`
+import { countries } from './data'
+export type WordState = { mastery:number; streak:number; due:number; mistakes:number; [futureField:string]:unknown }
+export type Progress = { schemaVersion:number; xp:number; totalCorrect:number; streakDays:number; lastDate:string; words:Record<string,WordState>; completed:number[]; unlockedCountries:number; unlockedCountryCodes:string[]; dark:boolean; mentor:boolean; [futureField:string]:unknown }
+export const SCHEMA_VERSION=2
+export const initial:Progress = {schemaVersion:SCHEMA_VERSION,xp:0,totalCorrect:0,streakDays:0,lastDate:'',words:{},completed:[],unlockedCountries:1,unlockedCountryCodes:[countries[0].code],dark:true,mentor:true}
+const key='world-explorer-academy-progress', backupKey=`${key}-backup`, legacyKey='world-explorer-academy-v1'
+const record=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v)
+const positive=(v:unknown,fallback=0)=>typeof v==='number'&&Number.isFinite(v)?Math.max(0,Math.floor(v)):fallback
+const unique=<T,>(v:T[])=>[...new Set(v)]
+const normalWord=(v:unknown):WordState=>{const p=record(v)?v:{};return {...p,mastery:Math.min(5,positive(p.mastery)),streak:positive(p.streak),due:positive(p.due),mistakes:positive(p.mistakes)}}
+const combineWord=(a:WordState,b:WordState):WordState=>({...a,...b,mastery:Math.max(a.mastery,b.mastery),streak:Math.max(a.streak,b.streak),mistakes:Math.min(a.mistakes,b.mistakes),due:Math.max(a.due,b.due)})
+// When a word is renamed in a future course, add old -> new here before shipping.
+const wordAliases:Record<string,string>={}
+const stableWord=(en:string)=>{const normalized=en.normalize('NFKC').toLowerCase().replace(/\s+/g,' ').trim();return `word:${wordAliases[normalized]||normalized}`}
+// Migrations never filter unknown level/word IDs: future course revisions can restore them.
+// Add future schema upgrades here, one version at a time; retain unrecognized fields.
+export function validateProgress(data:unknown):Progress {
+ if(!record(data))throw Error('Неверный файл прогресса')
+ if('format'in data&&data.format!=='world-explorer-academy-progress')throw Error('Неверный формат файла')
+ const source=record(data.progress)?data.progress:data
+ if(!record(source.words)||!Array.isArray(source.completed)||typeof source.xp!=='number'||!Number.isFinite(source.xp))throw Error('Файл не содержит корректный прогресс')
+ const version=source.schemaVersion===undefined?1:positive(source.schemaVersion)
+ if(version>SCHEMA_VERSION)throw Error('Этот файл создан более новой версией Академии')
+ const words:Record<string,WordState>={};for(const [id,value] of Object.entries(source.words))if(record(value))words[id]=normalWord(value)
+ for(const [id,state] of Object.entries(words)){const old=/^\d+:(.+)$/.exec(id);if(old){const stable=stableWord(old[1]);words[stable]=words[stable]?combineWord(words[stable],state):state}}
+ const completed=unique(source.completed.filter((v):v is number=>typeof v==='number'&&Number.isSafeInteger(v)&&v>0))
+ const unlockedCountries=Math.max(1,positive(source.unlockedCountries,1))
+ const unlockedCountryCodes=unique([...(Array.isArray(source.unlockedCountryCodes)?source.unlockedCountryCodes.filter((v):v is string=>typeof v==='string'):countries.slice(0,unlockedCountries).map(c=>c.code)),...countries.slice(0,Math.min(unlockedCountries,countries.length)).map(c=>c.code)])
+ return {...initial,...source,schemaVersion:SCHEMA_VERSION,xp:positive(source.xp),totalCorrect:positive(source.totalCorrect),streakDays:positive(source.streakDays),lastDate:typeof source.lastDate==='string'?source.lastDate:'',words,completed,unlockedCountries,unlockedCountryCodes,dark:typeof source.dark==='boolean'?source.dark:true,mentor:typeof source.mentor==='boolean'?source.mentor:true}
+}
+export function mergeProgress(current:Progress,incoming:Progress):Progress {
+ const a=validateProgress(current),b=validateProgress(incoming),words={...a.words}
+ for(const [id,item] of Object.entries(b.words)){const old=words[id];words[id]=old?combineWord(old,item):item}
+ const completed=unique([...a.completed,...b.completed]),unlockedCountryCodes=unique([...a.unlockedCountryCodes,...b.unlockedCountryCodes])
+ return {...a,...b,schemaVersion:SCHEMA_VERSION,words,completed,unlockedCountryCodes,xp:Math.max(a.xp,b.xp),totalCorrect:Math.max(a.totalCorrect,b.totalCorrect),streakDays:Math.max(a.streakDays,b.streakDays),lastDate:a.lastDate>b.lastDate?a.lastDate:b.lastDate,unlockedCountries:Math.max(a.unlockedCountries,b.unlockedCountries,unlockedCountryCodes.length,1+Math.floor(Math.max(a.totalCorrect,b.totalCorrect)/10)+completed.length)}
+}
+export function loadProgress():Progress {let result=initial;try {for(const storageKey of [legacyKey,backupKey,key]){const raw=localStorage.getItem(storageKey);if(!raw)continue;try{result=mergeProgress(result,validateProgress(JSON.parse(raw)))}catch{/* keep other copies */}}}catch{/* localStorage blocked */}return result}
+export function saveProgress(p:Progress){try{const old=localStorage.getItem(key);if(old)try{validateProgress(JSON.parse(old));localStorage.setItem(backupKey,old)}catch{/* don't overwrite a valid backup */}localStorage.setItem(key,JSON.stringify(validateProgress(p)))}catch{/* Private mode may block storage; file export remains available */}}
+export function exportProgress(p:Progress){const payload={format:'world-explorer-academy-progress',exportedAt:new Date().toISOString(),progress:validateProgress(p)};const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='world-explorer-progress.json';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000)}
+export const wordKey=(_level:number,en:string)=>stableWord(en)
 export function markWord(p:Progress,level:number,en:string,correct:boolean):Progress { const key=wordKey(level,en); const old=p.words[key]||{mastery:0,streak:0,due:0,mistakes:0}; const streak=correct?old.streak+1:0; const mastery=correct?Math.min(5,old.mastery+1):Math.max(0,old.mastery-1); const delays=[0,0,3600000,86400000,3*86400000,7*86400000]; return {...p,words:{...p.words,[key]:{mastery,streak,due:correct && (old.mistakes===0||streak>=3)?Date.now()+delays[mastery]:0,mistakes:correct&&streak>=3?0:old.mistakes+(correct?0:1)}}} }
-export function reward(p:Progress,xp:number):Progress { const today=new Date().toLocaleDateString('en-CA'); const yesterday=new Date(Date.now()-86400000).toLocaleDateString('en-CA'); const streakDays=p.lastDate===today?p.streakDays:p.lastDate===yesterday?p.streakDays+1:1; const totalCorrect=p.totalCorrect+1; const unlockedCountries=Math.min(countries.length,Math.max(p.unlockedCountries,1+Math.floor(totalCorrect/10)+p.completed.length)); return {...p,xp:p.xp+xp,totalCorrect,lastDate:today,streakDays,unlockedCountries} }
+export function reward(p:Progress,xp:number):Progress { const today=new Date().toLocaleDateString('en-CA'); const yesterday=new Date(Date.now()-86400000).toLocaleDateString('en-CA'); const streakDays=p.lastDate===today?p.streakDays:p.lastDate===yesterday?p.streakDays+1:1; const totalCorrect=p.totalCorrect+1; const unlockedCountries=Math.max(p.unlockedCountries,1+Math.floor(totalCorrect/10)+p.completed.length);return {...p,xp:p.xp+xp,totalCorrect,lastDate:today,streakDays,unlockedCountries,unlockedCountryCodes:unique([...p.unlockedCountryCodes,...countries.slice(0,unlockedCountries).map(c=>c.code)])} }
 export function rank(xp:number){if(xp>=1800)return 'Гранд-Магистр Атласа';if(xp>=900)return 'Мастер Экспедиций';if(xp>=400)return 'Картограф Мира';if(xp>=150)return 'Искатель Открытий';return 'Юный Следопыт'}
 export function nextRank(xp:number){return [150,400,900,1800].find(n=>n>xp)||Math.ceil((xp+1)/500)*500}
 
